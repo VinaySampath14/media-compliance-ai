@@ -20,6 +20,7 @@ def _make_state(transcript="This is a test ad.", ocr_text=None):
         "video_url": "https://www.youtube.com/watch?v=test",
         "video_id": "vid_test001",
         "transcript": transcript,
+        "transcript_segments": [{"text": transcript, "timestamp": "00:00:01"}],
         "ocr_text": ocr_text or [],
         "video_metadata": {},
         "compliance_results": [],
@@ -84,7 +85,9 @@ def test_auditor_returns_violations_on_fail(mock_llm_cls, mock_emb_cls, mock_sea
         {
             "category": "FTC Disclosure",
             "severity": "CRITICAL",
-            "description": "Sponsorship not disclosed at the start of the video."
+            "description": "Sponsorship not disclosed at the start of the video.",
+            "timestamp": "00:00:05",
+            "confidence": 0.92
         }
     ]
     mock_llm_cls.return_value.invoke.return_value = _llm_response({
@@ -100,6 +103,8 @@ def test_auditor_returns_violations_on_fail(mock_llm_cls, mock_emb_cls, mock_sea
     assert len(result["compliance_results"]) == 1
     assert result["compliance_results"][0]["severity"] == "CRITICAL"
     assert result["compliance_results"][0]["category"] == "FTC Disclosure"
+    assert result["compliance_results"][0]["timestamp"] == "00:00:05"
+    assert result["compliance_results"][0]["confidence"] == 0.92
     assert "final_report" in result
 
 
@@ -120,6 +125,82 @@ def test_auditor_skips_when_no_transcript():
 
 # ------------------------------------------------------------------ #
 # Test 4 — LLM wraps response in markdown code block
+# ------------------------------------------------------------------ #
+
+# ------------------------------------------------------------------ #
+# Test 5 — Borderline confidence → REVIEW status + severity downgrade
+# ------------------------------------------------------------------ #
+
+@patch("langchain_community.vectorstores.AzureSearch")
+@patch("langchain_openai.AzureOpenAIEmbeddings")
+@patch("langchain_openai.AzureChatOpenAI")
+def test_auditor_downgrades_borderline_confidence(mock_llm_cls, mock_emb_cls, mock_search_cls):
+    """Violations with confidence 0.5–0.74 must be downgraded to REVIEW NEEDED and status REVIEW."""
+    from backend.src.graph.nodes import audit_content_node
+
+    mock_doc = MagicMock()
+    mock_doc.page_content = "All health claims must be substantiated."
+    mock_search_cls.return_value.similarity_search.return_value = [mock_doc]
+
+    mock_llm_cls.return_value.invoke.return_value = _llm_response({
+        "compliance_results": [
+            {
+                "category": "Health Claims",
+                "severity": "WARNING",
+                "description": "Claim may be exaggerated.",
+                "timestamp": "00:00:10",
+                "confidence": 0.60
+            }
+        ],
+        "status": "FAIL",
+        "final_report": "Borderline violation found."
+    })
+
+    state = _make_state(transcript="Our product may help with energy levels.")
+    result = audit_content_node(state)
+
+    assert result["final_status"] == "REVIEW"
+    assert result["compliance_results"][0]["severity"] == "REVIEW NEEDED"
+
+
+# ------------------------------------------------------------------ #
+# Test 6 — Low confidence → violations dropped, status PASS
+# ------------------------------------------------------------------ #
+
+@patch("langchain_community.vectorstores.AzureSearch")
+@patch("langchain_openai.AzureOpenAIEmbeddings")
+@patch("langchain_openai.AzureChatOpenAI")
+def test_auditor_drops_low_confidence_violations(mock_llm_cls, mock_emb_cls, mock_search_cls):
+    """Violations with confidence < 0.5 must be filtered out entirely."""
+    from backend.src.graph.nodes import audit_content_node
+
+    mock_doc = MagicMock()
+    mock_doc.page_content = "Ads must not mislead consumers."
+    mock_search_cls.return_value.similarity_search.return_value = [mock_doc]
+
+    mock_llm_cls.return_value.invoke.return_value = _llm_response({
+        "compliance_results": [
+            {
+                "category": "Misleading Claims",
+                "severity": "WARNING",
+                "description": "Possibly misleading but unclear.",
+                "timestamp": None,
+                "confidence": 0.30
+            }
+        ],
+        "status": "FAIL",
+        "final_report": "Uncertain violation found."
+    })
+
+    state = _make_state(transcript="Our product is pretty good.")
+    result = audit_content_node(state)
+
+    assert result["final_status"] == "PASS"
+    assert result["compliance_results"] == []
+
+
+# ------------------------------------------------------------------ #
+# Test 7 — LLM wraps response in markdown code block
 # ------------------------------------------------------------------ #
 
 @patch("langchain_community.vectorstores.AzureSearch")

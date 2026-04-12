@@ -42,6 +42,12 @@ class JobStatus(str, Enum):
     FAILED    = "FAILED"
 
 
+class AuditVerdict(str, Enum):
+    PASS   = "PASS"
+    REVIEW = "REVIEW"   # only borderline violations (confidence 0.5–0.74)
+    FAIL   = "FAIL"
+
+
 # ------------------------------------------------------------------ #
 # FastAPI app
 # ------------------------------------------------------------------ #
@@ -68,8 +74,10 @@ class AuditJobResponse(BaseModel):
 
 class ComplianceIssue(BaseModel):
     category: str
-    severity: str
+    severity: str                      # "CRITICAL", "WARNING", or "REVIEW NEEDED"
     description: str
+    timestamp: Optional[str] = None    # HH:MM:SS pinpointing where in the video
+    confidence: float = 1.0            # 0.0–1.0 GPT-4 certainty score
 
 
 class AuditResult(BaseModel):
@@ -77,7 +85,7 @@ class AuditResult(BaseModel):
     session_id: str
     video_id: str
     status: JobStatus
-    final_status: Optional[str] = None
+    final_status: Optional[AuditVerdict] = None
     final_report: Optional[str] = None
     compliance_results: List[ComplianceIssue] = []
     error: Optional[str] = None

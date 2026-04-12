@@ -91,6 +91,8 @@ if run and video_url:
     final_status = data.get("final_status", "UNKNOWN")
     if final_status == "PASS":
         st.success("PASS — No compliance violations found.")
+    elif final_status == "REVIEW":
+        st.warning("REVIEW NEEDED — Borderline violations detected. Human review recommended.")
     else:
         st.error("FAIL — Compliance violations detected.")
 
@@ -104,10 +106,25 @@ if run and video_url:
     if violations:
         st.subheader(f"Violations ({len(violations)})")
         for v in violations:
-            severity = v.get("severity", "WARNING")
-            color = "🔴" if severity == "CRITICAL" else "🟡"
-            with st.expander(f"{color} [{severity}] {v.get('category')}"):
+            severity   = v.get("severity", "WARNING")
+            timestamp  = v.get("timestamp")
+            confidence = v.get("confidence", 1.0)
+            ts_label   = f" · ⏱ {timestamp}" if timestamp else ""
+
+            if severity == "CRITICAL":
+                color = "🔴"
+            elif severity == "REVIEW NEEDED":
+                color = "🟠"
+            else:
+                color = "🟡"
+
+            with st.expander(f"{color} [{severity}] {v.get('category')}{ts_label}"):
                 st.write(v.get("description"))
+
+                col1, col2 = st.columns([3, 1])
+                col1.progress(confidence, text=f"Confidence: {int(confidence * 100)}%")
+                if timestamp:
+                    col2.caption(f"⏱ `{timestamp}`")
     else:
         st.info("No violations found.")
 

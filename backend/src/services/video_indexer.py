@@ -149,23 +149,58 @@ class VideoIndexerService:
     # Parse the Azure VI JSON into just what our state needs
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _format_timestamp(raw: str) -> str:
+        """
+        Converts Azure VI timestamp (e.g. '0:01:32.5' or '0:00:05') to HH:MM:SS.
+        Returns '00:00:00' if parsing fails.
+        """
+        try:
+            parts = raw.split(":")
+            if len(parts) == 3:
+                h, m, s = parts
+                return f"{int(h):02d}:{int(m):02d}:{int(float(s)):02d}"
+            elif len(parts) == 2:
+                m, s = parts
+                return f"00:{int(m):02d}:{int(float(s)):02d}"
+        except Exception:
+            pass
+        return "00:00:00"
+
     def extract_data(self, vi_json):
-        """Extracts transcript and OCR text from Azure VI response."""
-        transcript_lines = []
-        ocr_lines = []
+        """
+        Extracts transcript segments (with timestamps), flat transcript, and OCR
+        from the Azure Video Indexer response.
+        """
+        transcript_segments = []   # [{text, timestamp}] — used by auditor for pinning
+        transcript_lines    = []   # flat text — kept for backward compat
+        ocr_lines           = []
 
         for video in vi_json.get("videos", []):
             insights = video.get("insights", {})
 
             for item in insights.get("transcript", []):
-                transcript_lines.append(item.get("text", ""))
+                text = item.get("text", "")
+                if not text:
+                    continue
+
+                # Azure VI stores timing in item["instances"][0]["adjustedStart"]
+                instances = item.get("instances", [])
+                raw_ts    = instances[0].get("adjustedStart", "0:00:00") if instances else "0:00:00"
+                timestamp = self._format_timestamp(raw_ts)
+
+                transcript_segments.append({"text": text, "timestamp": timestamp})
+                transcript_lines.append(f"[{timestamp}] {text}")
 
             for item in insights.get("ocr", []):
-                ocr_lines.append(item.get("text", ""))
+                ocr_text = item.get("text", "")
+                if ocr_text:
+                    ocr_lines.append(ocr_text)
 
         return {
-            "transcript": " ".join(transcript_lines),
-            "ocr_text": ocr_lines,
+            "transcript":          "\n".join(transcript_lines),   # now includes [HH:MM:SS] prefixes
+            "transcript_segments": transcript_segments,
+            "ocr_text":            ocr_lines,
             "video_metadata": {
                 "duration": vi_json.get("summarizedInsights", {}).get("duration", {}).get("seconds"),
                 "platform": "youtube"

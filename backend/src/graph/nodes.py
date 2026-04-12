@@ -115,15 +115,24 @@ OFFICIAL REGULATORY RULES:
 
 INSTRUCTIONS:
 1. Analyze the transcript and OCR text provided.
-2. Identify ANY violations of the rules above.
-3. Return ONLY valid JSON in this exact format — no markdown, no extra text:
+2. The transcript includes [HH:MM:SS] timestamps at the start of each line.
+3. Identify ANY violations of the rules above.
+4. For each violation:
+   - Set "timestamp" to the [HH:MM:SS] of the line where the violation occurs.
+     If it spans multiple lines or cannot be pinned, set "timestamp" to null.
+   - Set "confidence" to a float between 0.0 and 1.0 representing how certain
+     you are that this is a genuine violation based on the rules provided.
+     Use 0.9+ for clear, unambiguous violations. Use 0.5–0.7 for borderline cases.
+5. Return ONLY valid JSON in this exact format — no markdown, no extra text:
 
 {{
     "compliance_results": [
         {{
             "category": "Category name",
             "severity": "CRITICAL or WARNING",
-            "description": "Specific explanation of the violation"
+            "description": "Specific explanation of the violation",
+            "timestamp": "HH:MM:SS or null",
+            "confidence": 0.0 to 1.0
         }}
     ],
     "status": "PASS or FAIL",
@@ -135,7 +144,8 @@ If no violations found, return "status": "PASS" and "compliance_results": [].
 
     user_message = f"""
 VIDEO METADATA: {state.get('video_metadata', {})}
-TRANSCRIPT: {transcript}
+TRANSCRIPT (each line prefixed with [HH:MM:SS]):
+{transcript}
 ON-SCREEN TEXT (OCR): {ocr_text}
 """
 
@@ -155,9 +165,41 @@ ON-SCREEN TEXT (OCR): {ocr_text}
 
         audit_data = json.loads(content.strip())
 
+        # ------------------------------------------------------------------ #
+        # Post-process violations — apply confidence thresholds
+        #
+        # >= 0.75 → keep severity as-is (confirmed violation)
+        #  0.5–0.74 → downgrade severity to "REVIEW NEEDED" (borderline)
+        # < 0.50  → drop entirely (too uncertain to surface)
+        # ------------------------------------------------------------------ #
+        raw_results = audit_data.get("compliance_results", [])
+        results = []
+        for r in raw_results:
+            r.setdefault("timestamp", None)
+            confidence = float(r.get("confidence", 1.0))
+            r["confidence"] = round(confidence, 2)
+
+            if confidence < 0.50:
+                logger.info(f"[Auditor] Dropping low-confidence violation ({confidence:.2f}): {r.get('category')}")
+                continue
+            elif confidence < 0.75:
+                r["severity"] = "REVIEW NEEDED"
+
+            results.append(r)
+
+        # Derive final status from surviving violations
+        if not results:
+            final_status = "PASS"
+        elif all(r["severity"] == "REVIEW NEEDED" for r in results):
+            final_status = "REVIEW"
+        else:
+            final_status = "FAIL"
+
+        logger.info(f"[Auditor] {len(results)} violation(s) after confidence filtering. Status: {final_status}")
+
         return {
-            "compliance_results": audit_data.get("compliance_results", []),
-            "final_status": audit_data.get("status", "FAIL"),
+            "compliance_results": results,
+            "final_status": final_status,
             "final_report": audit_data.get("final_report", "No report generated.")
         }
 
