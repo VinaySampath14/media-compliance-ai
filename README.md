@@ -6,46 +6,72 @@ An AI pipeline that audits YouTube video ads against brand and regulatory compli
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              ENTRY POINTS                                   │
-│                                                                             │
-│   main.py (CLI Trigger)                                                     │
-│          │                                                                  │
-│          └──────► FastAPI Server (Backend)                                  │
-│                          │                                                  │
-│                    Triggers / Audit                                         │
-└──────────────────────────┼──────────────────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────────────────┐
-│                         ORCHESTRATION (LangGraph)                           │
-│                                                                             │
-│   ┌─────────────────────────────────────────────────────────────────────┐  │
-│   │                     RAG Workflow — LangGraph                        │  │
-│   │                                                                     │  │
-│   │   ┌──────────────────────┐         ┌───────────────────────────┐   │  │
-│   │   │  Video Processor     │────────►│   Azure Video Indexer     │   │  │
-│   │   │  (yt-dlp + Indexer)  │  upload │   OCR + Transcript        │   │  │
-│   │   └──────────────────────┘         └───────────┬───────────────┘   │  │
-│   │                                                │ Insights           │  │
-│   │   ┌──────────────────────┐                     │                   │  │
-│   │   │   Retrieval Engine   │◄────────────────────┘                   │  │
-│   │   │   (Azure AI Search)  │  query compliance rules                 │  │
-│   │   └──────────┬───────────┘                                         │  │
-│   │              │ Retrieved Rules                                      │  │
-│   │   ┌──────────▼───────────┐                                         │  │
-│   │   │  Compliance Auditor  │  GPT-4 → violations + report            │  │
-│   │   │  (Azure OpenAI)      │                                         │  │
-│   │   └──────────────────────┘                                         │  │
-│   └─────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    %% ─── Entry Points ───────────────────────────────────────────────
+    subgraph ENTRY["🚪 Entry Points"]
+        CLI["🖥️ main.py\nCLI Trigger"]
+        UI["🌐 Streamlit UI\nstreamlit_app.py"]
+        API["⚡ FastAPI Server\nPOST /audit"]
+    end
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    EXTERNAL INTELLIGENCE + OBSERVABILITY                    │
-│                                                                             │
-│   YouTube           Azure OpenAI         Azure App Insights    LangSmith   │
-│   Video Source      LLM + Embeddings     Logs + Metrics        Tracing     │
-└─────────────────────────────────────────────────────────────────────────────┘
+    %% ─── Orchestration ───────────────────────────────────────────────
+    subgraph ORCH["🔁 Orchestration — LangGraph StateGraph"]
+        direction TB
+        VP["📥 Video Processor\nyt-dlp download"]
+        AVI["🎬 Azure Video Indexer\nOCR + Transcript"]
+        RE["🔍 Retrieval Engine\nAzure AI Search · RAG k=3"]
+        CA["🤖 Compliance Auditor\nGPT-4 Analysis"]
+    end
+
+    %% ─── Azure Infra ─────────────────────────────────────────────────
+    subgraph AZURE["☁️ Azure Managed Infrastructure"]
+        BLOB["📦 Azure Blob Storage\nTemp Video"]
+        SEARCH["🗂️ Azure AI Search\nVector DB"]
+        AOAI["🧠 Azure OpenAI\nGPT-4 + Embeddings"]
+        APPINS["📊 Azure App Insights\nLogs + Metrics"]
+    end
+
+    %% ─── Observability ───────────────────────────────────────────────
+    subgraph OBS["🔭 Observability"]
+        LS["🔗 LangSmith\nTracing + Debugging"]
+        OT["📡 OpenTelemetry\nInstrumentation"]
+    end
+
+    %% ─── Output ──────────────────────────────────────────────────────
+    OUT["✅ Audit Report\nPASS / FAIL · Violations · Summary"]
+
+    %% ─── Flow ────────────────────────────────────────────────────────
+    CLI --> API
+    UI  --> API
+    API --> VP
+
+    VP  -->|"upload temp file"| BLOB
+    VP  -->|"send to indexer"| AVI
+    AVI -->|"OCR + transcript"| RE
+    RE  -->|"similarity search"| SEARCH
+    SEARCH -->|"top-k rule chunks"| CA
+    CA  -->|"GPT-4 prompt"| AOAI
+    AOAI -->|"violations JSON"| CA
+    CA  --> OUT
+
+    %% ─── Observability wiring ────────────────────────────────────────
+    ORCH -.->|"traces"| LS
+    ORCH -.->|"spans"| OT
+    OT   -.->|"export"| APPINS
+
+    %% ─── Styling ─────────────────────────────────────────────────────
+    classDef entryStyle   fill:#4A90D9,stroke:#2c5f8a,color:#fff,rx:8
+    classDef orchStyle    fill:#7B68EE,stroke:#5a4dc4,color:#fff,rx:8
+    classDef azureStyle   fill:#0078D4,stroke:#005a9e,color:#fff,rx:8
+    classDef obsStyle     fill:#20B2AA,stroke:#148f89,color:#fff,rx:8
+    classDef outputStyle  fill:#27AE60,stroke:#1e8449,color:#fff,rx:12
+
+    class CLI,UI,API entryStyle
+    class VP,AVI,RE,CA orchStyle
+    class BLOB,SEARCH,AOAI,APPINS azureStyle
+    class LS,OT obsStyle
+    class OUT outputStyle
 ```
 
 ---
