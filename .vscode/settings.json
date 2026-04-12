@@ -1,0 +1,7 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.env.windows": {
+        "PATH": "C:\\Program Files (x86)\\Microsoft SDKs\\Azure\\CLI2\\wbin;${env:PATH}"
+    }
+}

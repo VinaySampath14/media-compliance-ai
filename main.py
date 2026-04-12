@@ -51,6 +51,10 @@ def run():
     print("\n[ SUMMARY ]")
     print(final_state.get("final_report"))
 
+    print("\n[ TRANSCRIPT ]")
+    print(final_state.get("transcript", "No transcript"))
+
+
 
 if __name__ == "__main__":
     run()
