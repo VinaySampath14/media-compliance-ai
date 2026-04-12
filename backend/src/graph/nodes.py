@@ -51,10 +51,17 @@ def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
 # --- NODE 2: AUDITOR ---
 def audit_content_node(state: VideoAuditState) -> Dict[str, Any]:
     """
-    Queries Azure AI Search for compliance rules, sends to GPT-4, returns violations.
-    Currently returns hardcoded data — real Azure + OpenAI calls added in Phase 5.
+    Retrieves relevant compliance rules from Azure AI Search,
+    sends transcript + rules to GPT-4, returns structured violations.
     """
+    import json
+    import re
+    from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+    from langchain_community.vectorstores import AzureSearch
+    from langchain_core.messages import SystemMessage, HumanMessage
+
     transcript = state.get("transcript", "")
+    ocr_text = state.get("ocr_text", [])
     logger.info("[Auditor] Auditing transcript...")
 
     if not transcript:
@@ -64,17 +71,100 @@ def audit_content_node(state: VideoAuditState) -> Dict[str, Any]:
             "final_report": "Audit skipped — no transcript available."
         }
 
-    # --- HARDCODED FOR NOW ---
-    # Real version will: query Azure AI Search → build prompt → call GPT-4 → parse JSON
-    return {
-        "compliance_results": [
-            {
-                "category": "Misleading Claims",
-                "severity": "CRITICAL",
-                "description": "Absolute guarantee of results detected — violates FTC guidelines.",
-                "timestamp": "00:05"
-            }
-        ],
-        "final_status": "FAIL",
-        "final_report": "Video contains 1 critical violation. Absolute health guarantees are prohibited under FTC regulations."
-    }
+    # ------------------------------------------------------------------ #
+    # STEP 1 — Initialize clients
+    # ------------------------------------------------------------------ #
+    llm = AzureChatOpenAI(
+        azure_deployment=os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT"),
+        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        temperature=0.0  # deterministic output — no creativity in compliance
+    )
+
+    embeddings = AzureOpenAIEmbeddings(
+        azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT"),
+        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    )
+
+    vector_store = AzureSearch(
+        azure_search_endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+        azure_search_key=os.getenv("AZURE_SEARCH_API_KEY"),
+        index_name=os.getenv("AZURE_SEARCH_INDEX_NAME"),
+        embedding_function=embeddings.embed_query
+    )
+
+    # ------------------------------------------------------------------ #
+    # STEP 2 — RAG: retrieve relevant compliance rules
+    # Combine transcript + OCR as the search query
+    # k=3 means return the 3 most relevant chunks
+    # ------------------------------------------------------------------ #
+    query_text = f"{transcript} {' '.join(ocr_text)}"
+    docs = vector_store.similarity_search(query_text, k=3)
+    retrieved_rules = "\n\n".join([doc.page_content for doc in docs])
+
+    logger.info(f"[Auditor] Retrieved {len(docs)} rule chunks from knowledge base.")
+
+    # ------------------------------------------------------------------ #
+    # STEP 3 — Build the prompt and call GPT-4
+    # Strict JSON schema enforced so parsing never breaks
+    # ------------------------------------------------------------------ #
+    system_prompt = f"""
+You are a Senior Brand Compliance Auditor.
+
+OFFICIAL REGULATORY RULES:
+{retrieved_rules}
+
+INSTRUCTIONS:
+1. Analyze the transcript and OCR text provided.
+2. Identify ANY violations of the rules above.
+3. Return ONLY valid JSON in this exact format — no markdown, no extra text:
+
+{{
+    "compliance_results": [
+        {{
+            "category": "Category name",
+            "severity": "CRITICAL or WARNING",
+            "description": "Specific explanation of the violation"
+        }}
+    ],
+    "status": "PASS or FAIL",
+    "final_report": "One paragraph summary of findings."
+}}
+
+If no violations found, return "status": "PASS" and "compliance_results": [].
+"""
+
+    user_message = f"""
+VIDEO METADATA: {state.get('video_metadata', {})}
+TRANSCRIPT: {transcript}
+ON-SCREEN TEXT (OCR): {ocr_text}
+"""
+
+    try:
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message)
+        ])
+
+        content = response.content
+
+        # Strip markdown code blocks if GPT-4 wraps response in ```json ... ```
+        if "```" in content:
+            match = re.search(r"```(?:json)?(.*?)```", content, re.DOTALL)
+            if match:
+                content = match.group(1)
+
+        audit_data = json.loads(content.strip())
+
+        return {
+            "compliance_results": audit_data.get("compliance_results", []),
+            "final_status": audit_data.get("status", "FAIL"),
+            "final_report": audit_data.get("final_report", "No report generated.")
+        }
+
+    except Exception as e:
+        logger.error(f"[Auditor] Failed: {e}")
+        return {
+            "errors": [str(e)],
+            "final_status": "FAIL",
+            "final_report": "Audit failed due to a system error."
+        }
