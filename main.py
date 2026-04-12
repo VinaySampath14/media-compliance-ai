@@ -9,8 +9,14 @@ from backend.src.graph.workflow import app
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+# Suppress noisy Azure SDK and OpenTelemetry logs
+logging.getLogger("azure").setLevel(logging.WARNING)
+logging.getLogger("opentelemetry").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 logger = logging.getLogger("media-compliance-ai")
 
 
@@ -19,7 +25,7 @@ def run():
     logger.info(f"Starting Audit Session: {session_id}")
 
     initial_inputs = {
-        "video_url": "https://youtu.be/dT7S75eYhcQ",
+        "video_url": "https://www.youtube.com/watch?v=idnwh6iDnXA",
         "video_id": f"vid_{session_id[:8]}",
         "compliance_results": [],
         "errors": []
