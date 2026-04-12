@@ -1,8 +1,15 @@
+import os
 import time
 import requests
 import streamlit as st
 
-BASE_URL = "http://localhost:8000"
+# Streamlit Cloud stores secrets in st.secrets
+# Locally falls back to os.getenv, then localhost
+BASE_URL = (
+    st.secrets.get("COMPLIANCE_API_URL")
+    or os.getenv("COMPLIANCE_API_URL")
+    or "http://localhost:8000"
+).rstrip("/")
 
 # ------------------------------------------------------------------ #
 # Page config
@@ -125,6 +132,9 @@ if run and video_url:
                 col1.progress(confidence, text=f"Confidence: {int(confidence * 100)}%")
                 if timestamp:
                     col2.caption(f"⏱ `{timestamp}`")
+
+                if v.get("source"):
+                    st.caption(f"Rule source: **{v.get('source')}**")
     else:
         st.info("No violations found.")
 
