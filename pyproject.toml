@@ -23,3 +23,12 @@ dependencies = [
     "uvicorn>=0.30.0",
     "yt-dlp>=2025.1.12",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -1,6 +1,8 @@
 import uuid
+import asyncio
 import logging
-from typing import List, Optional
+from typing import List, Dict, Optional
+from enum import Enum
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -26,6 +28,21 @@ logger = logging.getLogger("api-server")
 
 
 # ------------------------------------------------------------------ #
+# In-memory job store
+# Maps job_id → job result dict.
+# Replace with Redis or Azure Cosmos DB for multi-instance deployments.
+# ------------------------------------------------------------------ #
+_jobs: Dict[str, dict] = {}
+
+
+class JobStatus(str, Enum):
+    PENDING   = "PENDING"
+    RUNNING   = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED    = "FAILED"
+
+
+# ------------------------------------------------------------------ #
 # FastAPI app
 # ------------------------------------------------------------------ #
 app = FastAPI(
@@ -36,12 +53,17 @@ app = FastAPI(
 
 
 # ------------------------------------------------------------------ #
-# Pydantic models — define the shape of requests and responses
-# FastAPI validates automatically — wrong format = 422 error
+# Pydantic models
 # ------------------------------------------------------------------ #
 
 class AuditRequest(BaseModel):
-    video_url: str          # YouTube URL from the client
+    video_url: str
+
+
+class AuditJobResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    message: str
 
 
 class ComplianceIssue(BaseModel):
@@ -50,53 +72,119 @@ class ComplianceIssue(BaseModel):
     description: str
 
 
-class AuditResponse(BaseModel):
+class AuditResult(BaseModel):
+    job_id: str
     session_id: str
     video_id: str
-    status: str
-    final_report: str
-    compliance_results: List[ComplianceIssue]
+    status: JobStatus
+    final_status: Optional[str] = None
+    final_report: Optional[str] = None
+    compliance_results: List[ComplianceIssue] = []
+    error: Optional[str] = None
 
 
 # ------------------------------------------------------------------ #
-# Endpoints
+# Background worker
 # ------------------------------------------------------------------ #
 
-@app.post("/audit", response_model=AuditResponse)
-async def audit_video(request: AuditRequest):
-    """
-    Triggers the full compliance audit pipeline.
-    POST /audit
-    Body: {"video_url": "https://youtu.be/..."}
-    """
-    session_id = str(uuid.uuid4())
-    video_id = f"vid_{session_id[:8]}"
-
-    logger.info(f"Audit request received: {request.video_url} (session: {session_id})")
+async def _run_audit(job_id: str, session_id: str, video_id: str, video_url: str):
+    """Runs the LangGraph pipeline in the background and updates _jobs."""
+    _jobs[job_id]["status"] = JobStatus.RUNNING
+    logger.info(f"[{job_id}] Audit started: {video_url}")
 
     initial_inputs = {
-        "video_url": request.video_url,
+        "video_url": video_url,
         "video_id": video_id,
         "compliance_results": [],
         "errors": []
     }
 
     try:
-        # invoke() runs: START → indexer → auditor → END
-        # NOTE: this is a blocking call — for production use ainvoke()
-        final_state = compliance_graph.invoke(initial_inputs)
+        # ainvoke() — non-blocking, yields control back to the event loop
+        final_state = await compliance_graph.ainvoke(initial_inputs)
 
-        return AuditResponse(
-            session_id=session_id,
-            video_id=final_state.get("video_id", video_id),
-            status=final_state.get("final_status", "UNKNOWN"),
-            final_report=final_state.get("final_report", "No report generated."),
-            compliance_results=final_state.get("compliance_results", [])
-        )
+        _jobs[job_id].update({
+            "status":             JobStatus.COMPLETED,
+            "final_status":       final_state.get("final_status", "UNKNOWN"),
+            "final_report":       final_state.get("final_report", "No report generated."),
+            "compliance_results": final_state.get("compliance_results", []),
+        })
+        logger.info(f"[{job_id}] Audit completed: {_jobs[job_id]['final_status']}")
 
     except Exception as e:
-        logger.error(f"Audit failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Workflow failed: {str(e)}")
+        logger.error(f"[{job_id}] Audit failed: {e}")
+        _jobs[job_id].update({
+            "status": JobStatus.FAILED,
+            "error":  str(e),
+        })
+
+
+# ------------------------------------------------------------------ #
+# Endpoints
+# ------------------------------------------------------------------ #
+
+@app.post("/audit", response_model=AuditJobResponse, status_code=202)
+async def start_audit(request: AuditRequest):
+    """
+    Accepts a YouTube URL and immediately returns a job_id.
+    The audit runs in the background — poll GET /audit/{job_id} for results.
+
+    POST /audit
+    Body: {"video_url": "https://youtu.be/..."}
+    Returns: {"job_id": "...", "status": "PENDING", "message": "..."}
+    """
+    session_id = str(uuid.uuid4())
+    job_id     = str(uuid.uuid4())
+    video_id   = f"vid_{session_id[:8]}"
+
+    # Register job as pending before background task starts
+    _jobs[job_id] = {
+        "status":             JobStatus.PENDING,
+        "session_id":         session_id,
+        "video_id":           video_id,
+        "final_status":       None,
+        "final_report":       None,
+        "compliance_results": [],
+        "error":              None,
+    }
+
+    # Fire and forget — does not block the response
+    asyncio.create_task(_run_audit(job_id, session_id, video_id, request.video_url))
+
+    logger.info(f"Audit job queued: {job_id} for {request.video_url}")
+
+    return AuditJobResponse(
+        job_id=job_id,
+        status=JobStatus.PENDING,
+        message=f"Audit started. Poll GET /audit/{job_id} for results."
+    )
+
+
+@app.get("/audit/{job_id}", response_model=AuditResult)
+async def get_audit_result(job_id: str):
+    """
+    Returns the current status and results of an audit job.
+
+    GET /audit/{job_id}
+    - status=PENDING   → job is queued
+    - status=RUNNING   → pipeline is processing
+    - status=COMPLETED → results are ready
+    - status=FAILED    → audit failed, check error field
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+
+    return AuditResult(
+        job_id=job_id,
+        session_id=job["session_id"],
+        video_id=job["video_id"],
+        status=job["status"],
+        final_status=job.get("final_status"),
+        final_report=job.get("final_report"),
+        compliance_results=job.get("compliance_results", []),
+        error=job.get("error"),
+    )
 
 
 @app.get("/health")

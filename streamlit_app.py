@@ -1,5 +1,8 @@
-import streamlit as st
+import time
 import requests
+import streamlit as st
+
+BASE_URL = "http://localhost:8000"
 
 # ------------------------------------------------------------------ #
 # Page config
@@ -24,37 +27,69 @@ video_url = st.text_input(
 run = st.button("Run Audit", type="primary", disabled=not video_url)
 
 # ------------------------------------------------------------------ #
-# Audit
+# Audit — submit then poll
 # ------------------------------------------------------------------ #
 if run and video_url:
-    with st.spinner("Auditing video... this may take a few minutes."):
-        try:
-            response = requests.post(
-                "http://localhost:8000/audit",
-                json={"video_url": video_url},
-                timeout=600  # 10 min max — Azure VI takes time
-            )
-            response.raise_for_status()
-            data = response.json()
 
-        except requests.exceptions.Timeout:
-            st.error("Request timed out. Azure Video Indexer is still processing — try again.")
+    # 1. Submit the job
+    try:
+        submit = requests.post(
+            f"{BASE_URL}/audit",
+            json={"video_url": video_url},
+            timeout=15
+        )
+        submit.raise_for_status()
+        job = submit.json()
+        job_id = job["job_id"]
+    except requests.exceptions.ConnectionError:
+        st.error("Cannot connect to the API. Make sure the FastAPI server is running.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Failed to submit audit: {e}")
+        st.stop()
+
+    st.info(f"Audit queued — Job ID: `{job_id}`")
+
+    # 2. Poll for results
+    status_placeholder = st.empty()
+    MAX_WAIT_SECONDS = 600   # 10 min
+    POLL_INTERVAL    = 5     # seconds between polls
+    elapsed          = 0
+
+    with st.spinner("Auditing video... this may take a few minutes."):
+        while elapsed < MAX_WAIT_SECONDS:
+            try:
+                poll = requests.get(f"{BASE_URL}/audit/{job_id}", timeout=10)
+                poll.raise_for_status()
+                data = poll.json()
+            except Exception as e:
+                st.error(f"Error polling for results: {e}")
+                st.stop()
+
+            status = data.get("status")
+            status_placeholder.caption(f"Status: **{status}** ({elapsed}s elapsed)")
+
+            if status == "COMPLETED":
+                break
+            elif status == "FAILED":
+                st.error(f"Audit failed: {data.get('error', 'Unknown error')}")
+                st.stop()
+
+            time.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+        else:
+            st.error("Audit timed out after 10 minutes. Try again.")
             st.stop()
-        except requests.exceptions.ConnectionError:
-            st.error("Cannot connect to the API. Make sure the FastAPI server is running.")
-            st.stop()
-        except Exception as e:
-            st.error(f"Something went wrong: {e}")
-            st.stop()
+
+    status_placeholder.empty()
 
     # ------------------------------------------------------------------ #
     # Results
     # ------------------------------------------------------------------ #
     st.divider()
 
-    # Status badge
-    status = data.get("status", "UNKNOWN")
-    if status == "PASS":
+    final_status = data.get("final_status", "UNKNOWN")
+    if final_status == "PASS":
         st.success("PASS — No compliance violations found.")
     else:
         st.error("FAIL — Compliance violations detected.")
@@ -62,7 +97,7 @@ if run and video_url:
     # Metadata
     col1, col2 = st.columns(2)
     col1.metric("Session ID", data.get("session_id", "")[:8] + "...")
-    col2.metric("Video ID", data.get("video_id", ""))
+    col2.metric("Video ID",   data.get("video_id", ""))
 
     # Violations
     violations = data.get("compliance_results", [])
